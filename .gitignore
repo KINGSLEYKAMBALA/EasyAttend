@@ -1,0 +1,36 @@
+# Node modules
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+*.env
+.env.local
+.env.*.local
+
+# Firebase service account (sensitive!)
+*/serviceAccountKey.json
+serviceAccountKey.json
+*/credentials/
+
+# Build output
+dist/
+build/
+.expo/
+*/dist/
+*/build/
+*/.expo/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated PDF reports
+EasyAttendAPI/reports/*.pdf
+
+# Expo
+.expo-shared/
