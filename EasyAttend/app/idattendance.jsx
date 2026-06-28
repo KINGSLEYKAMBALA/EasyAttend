@@ -112,45 +112,62 @@ export default function IdAttendanceScreen() {
 
   const handleSelectVenue = async (venue) => {
     setSelectedVenue(venue);
+    setDistanceToVenue(null);
     setPhase("locating");
 
+    // Always request permission — on every platform
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== "granted") {
-      Alert.alert("Permission Denied", "Location access is required.");
-      setPhase("venue");
-      return;
-    }
-
-    // Get venue coordinates — handle nested objects, strings, or numbers
-    const venueLat = parseFloat(venue.latitude ?? venue.location?.latitude ?? venue.coords?.latitude ?? 0);
-    const venueLon = parseFloat(venue.longitude ?? venue.location?.longitude ?? venue.coords?.longitude ?? 0);
-
-    if (!venueLat || !venueLon) {
       Alert.alert(
-        "Venue Has No Coordinates",
-        "This venue has no GPS coordinates saved. Please set coordinates in the admin panel.",
+        "Permission Denied",
+        "Location permission is required to verify you are at the venue.",
         [{ text: "Go Back", onPress: () => setPhase("venue") }]
       );
       return;
     }
 
-    // Watch position continuously so distance updates as instructor moves
-    const sub = await Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5 },
-      (loc) => {
-        const { latitude, longitude } = loc.coords;
-        const dist = Math.round(getDistance(latitude, longitude, venueLat, venueLon));
-        setDistanceToVenue(dist);
-      }
-    );
-    // Store subscription so we can remove it on unmount
-    locationSubRef.current = sub;
+    const venueLat = parseFloat(venue.latitude);
+    const venueLon = parseFloat(venue.longitude);
 
-    // Get immediate first reading
-    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
-    const dist = Math.round(getDistance(loc.coords.latitude, loc.coords.longitude, venueLat, venueLon));
-    setDistanceToVenue(dist);
-    setPhase("scanning");
+    if (isNaN(venueLat) || isNaN(venueLon) || (venueLat === 0 && venueLon === 0)) {
+      Alert.alert(
+        "No Coordinates",
+        `${venue.name} has no GPS coordinates saved. Please add them in the admin panel.`,
+        [{ text: "Go Back", onPress: () => setPhase("venue") }]
+      );
+      return;
+    }
+
+    try {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.BestForNavigation,
+      });
+      const dist = Math.round(
+        getDistance(loc.coords.latitude, loc.coords.longitude, venueLat, venueLon)
+      );
+      setDistanceToVenue(dist);
+    } catch (e) {
+      Alert.alert("GPS Error", "Could not get your location. Make sure GPS is turned on.");
+      setPhase("venue");
+    }
+  };
+
+  const recheckLocation = async () => {
+    if (!selectedVenue) return;
+    setDistanceToVenue(null);
+    try {
+      const venueLat = parseFloat(selectedVenue.latitude);
+      const venueLon = parseFloat(selectedVenue.longitude);
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.BestForNavigation,
+      });
+      const dist = Math.round(
+        getDistance(loc.coords.latitude, loc.coords.longitude, venueLat, venueLon)
+      );
+      setDistanceToVenue(dist);
+    } catch {
+      Alert.alert("GPS Error", "Could not get your location.");
+    }
   };
 
   const insideZone = distanceToVenue !== null && distanceToVenue <= 200;
@@ -371,12 +388,73 @@ export default function IdAttendanceScreen() {
     );
   }
 
-  // ── Locating GPS ───────────────────────────────────────────────────────────
+  // ── Location check screen ─────────────────────────────────────────────────
   if (phase === "locating") {
+    const canProceed = distanceToVenue !== null && distanceToVenue <= 200;
     return (
-      <View style={[styles.container, styles.center]}>
-        <ActivityIndicator color="#28a745" size="large" />
-        <Text style={[styles.emptyText, { marginTop: 16 }]}>Getting your location…</Text>
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setPhase("venue")}>
+            <Text style={styles.backBtn}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Location Check</Text>
+        </View>
+
+        <View style={styles.selectedCourseBanner}>
+          <Text style={styles.selectedCourseLabel}>Venue: </Text>
+          <Text style={styles.selectedCourseValue}>{selectedVenue?.name}</Text>
+        </View>
+
+        <View style={[styles.center, { flex: 1, padding: 24 }]}>
+          {distanceToVenue === null ? (
+            <>
+              <ActivityIndicator color="#28a745" size="large" />
+              <Text style={[styles.emptyText, { marginTop: 16 }]}>Getting your GPS location…</Text>
+              <Text style={[styles.emptyText, { marginTop: 8, fontSize: 11 }]}>Make sure GPS is enabled on your device</Text>
+            </>
+          ) : (
+            <>
+              {/* Status circle */}
+              <View style={[
+                styles.geoCircle,
+                canProceed ? styles.geoCircleIn : styles.geoCircleOut,
+              ]}>
+                <Text style={{ fontSize: 40, marginBottom: 6 }}>{canProceed ? "✅" : "❌"}</Text>
+                <Text style={styles.geoCircleLabel}>{canProceed ? "Inside Zone" : "Outside Zone"}</Text>
+              </View>
+
+              {/* Distance card */}
+              <View style={styles.geoInfoCard}>
+                <Text style={styles.geoInfoLabel}>YOUR DISTANCE FROM {selectedVenue?.name?.toUpperCase()}</Text>
+                <Text style={[styles.geoDistance, { color: canProceed ? "#28a745" : "#e74c3c" }]}>
+                  {distanceToVenue} metres
+                </Text>
+                <Text style={styles.geoLimit}>Allowed radius: 200 metres</Text>
+              </View>
+
+              {/* Message */}
+              <View style={[styles.geoMessage, canProceed ? styles.geoMessageIn : styles.geoMessageOut]}>
+                <Text style={styles.geoMessageText}>
+                  {canProceed
+                    ? "✅ You are within range. You can now scan student IDs."
+                    : `❌ You are ${distanceToVenue}m away. Move within 200m of ${selectedVenue?.name} to take attendance.`}
+                </Text>
+              </View>
+
+              {/* Proceed button — only if inside */}
+              {canProceed && (
+                <TouchableOpacity style={styles.btn} onPress={() => setPhase("scanning")}>
+                  <Text style={styles.btnText}>Proceed to Scan →</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Check again button */}
+              <TouchableOpacity style={[styles.btn, styles.btnSecondary, { marginTop: 12 }]} onPress={recheckLocation}>
+                <Text style={styles.btnSecondaryText}>🔄 Check Again</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
       </View>
     );
   }
@@ -402,7 +480,9 @@ export default function IdAttendanceScreen() {
       <View style={[styles.distanceBar, insideZone ? styles.distanceBarIn : styles.distanceBarOut]}>
         <Text style={styles.distanceBarVenue}>Step 3 of 3 — Scan student IDs</Text>
         <Text style={styles.distanceBarDist}>
-          {insideZone ? "✅" : "⚠️"} {distanceToVenue}m from venue
+          {distanceToVenue === null
+            ? "📡 Getting location…"
+            : `${insideZone ? "✅" : "⚠️"} ${distanceToVenue}m from venue`}
         </Text>
       </View>
 
@@ -627,6 +707,22 @@ const styles = StyleSheet.create({
 
   // Footer
   footer:           { padding: 16, borderTopWidth: 1, borderTopColor: "#2a3f5f", backgroundColor: "#0a0f1e" },
-  btn:              { backgroundColor: "#28a745", borderRadius: 10, padding: 16, alignItems: "center" },
+  btn:              { backgroundColor: "#28a745", borderRadius: 10, padding: 16, alignItems: "center", width: "100%" },
   btnText:          { color: "#ffffff", fontSize: 15, fontWeight: "bold" },
+  btnSecondary:     { backgroundColor: "#131c30", borderWidth: 1, borderColor: "#2a3f5f" },
+  btnSecondaryText: { color: "#8899bb", fontSize: 14, fontWeight: "bold" },
+
+  // Geofence check screen
+  geoCircle:        { width: 160, height: 160, borderRadius: 80, alignItems: "center", justifyContent: "center", marginBottom: 24, elevation: 6 },
+  geoCircleIn:      { backgroundColor: "#1a3a2a", borderWidth: 3, borderColor: "#28a745" },
+  geoCircleOut:     { backgroundColor: "#3a1a1a", borderWidth: 3, borderColor: "#e74c3c" },
+  geoCircleLabel:   { color: "#ffffff", fontSize: 15, fontWeight: "bold" },
+  geoInfoCard:      { backgroundColor: "#131c30", borderRadius: 16, padding: 20, alignItems: "center", width: "100%", marginBottom: 16, borderWidth: 1, borderColor: "#2a3f5f" },
+  geoInfoLabel:     { fontSize: 11, color: "#8899bb", marginBottom: 8, letterSpacing: 1, textAlign: "center" },
+  geoDistance:      { fontSize: 40, fontWeight: "bold", marginBottom: 4 },
+  geoLimit:         { fontSize: 12, color: "#8899bb" },
+  geoMessage:       { borderRadius: 12, padding: 16, width: "100%", marginBottom: 20 },
+  geoMessageIn:     { backgroundColor: "#1a3a2a", borderWidth: 1, borderColor: "#28a745" },
+  geoMessageOut:    { backgroundColor: "#3a1a1a", borderWidth: 1, borderColor: "#e74c3c" },
+  geoMessageText:   { color: "#ffffff", fontSize: 14, textAlign: "center", lineHeight: 22 },
 });

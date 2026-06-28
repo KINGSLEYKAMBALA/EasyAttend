@@ -19,6 +19,7 @@ export default function SessionScreen() {
   const [starting, setStarting] = useState(false);
   const [makeUpModalVisible, setMakeUpModalVisible] = useState(false);
   const [makeUpDate, setMakeUpDate] = useState("");
+  const [dateError, setDateError]   = useState("");
   const [makeUpReason, setMakeUpReason] = useState("");
 
   useEffect(() => {
@@ -91,9 +92,38 @@ export default function SessionScreen() {
 
   const handleInitiateSession = () => startSession(false);
 
+  // Auto-format input as YYYY-MM-DD while typing
+  const handleDateChange = (text) => {
+    // Strip non-digits
+    const digits = text.replace(/\D/g, "").slice(0, 8);
+    let formatted = digits;
+    if (digits.length > 4) formatted = digits.slice(0, 4) + "-" + digits.slice(4);
+    if (digits.length > 6) formatted = digits.slice(0, 4) + "-" + digits.slice(4, 6) + "-" + digits.slice(6);
+    setMakeUpDate(formatted);
+
+    // Validate when full date entered
+    if (formatted.length === 10) {
+      const d = new Date(formatted);
+      const [y, m, day] = formatted.split("-").map(Number);
+      if (isNaN(d.getTime()) || d.getFullYear() !== y || d.getMonth() + 1 !== m || d.getDate() !== day) {
+        setDateError("Invalid date. Please check the day/month.");
+      } else if (d < new Date(new Date().setHours(0,0,0,0))) {
+        setDateError("Date cannot be in the past.");
+      } else {
+        setDateError("");
+      }
+    } else {
+      setDateError("");
+    }
+  };
+
   const handleConfirmMakeUp = () => {
-    if (!makeUpDate) {
-      Alert.alert("Missing Date", "Please enter a date for the make-up class.");
+    if (!makeUpDate || makeUpDate.length < 10) {
+      Alert.alert("Missing Date", "Please enter a valid date (YYYY-MM-DD).");
+      return;
+    }
+    if (dateError) {
+      Alert.alert("Invalid Date", dateError);
       return;
     }
     setMakeUpModalVisible(false);
@@ -219,12 +249,19 @@ export default function SessionScreen() {
 
             <Text style={styles.modalLabel}>DATE</Text>
             <TextInput
-              style={styles.modalInput}
+              style={[styles.modalInput, dateError ? { borderColor: "#e74c3c", borderWidth: 1 } : {}]}
               placeholder="YYYY-MM-DD"
               placeholderTextColor="#555"
               value={makeUpDate}
-              onChangeText={setMakeUpDate}
+              onChangeText={handleDateChange}
+              keyboardType="numeric"
+              maxLength={10}
             />
+            {dateError ? (
+              <Text style={{ color: "#e74c3c", fontSize: 11, marginBottom: 8, marginTop: -4 }}>{dateError}</Text>
+            ) : makeUpDate.length === 10 && !dateError ? (
+              <Text style={{ color: "#28a745", fontSize: 11, marginBottom: 8, marginTop: -4 }}>✓ Valid date</Text>
+            ) : null}
 
             <Text style={styles.modalLabel}>REASON (OPTIONAL)</Text>
             <TextInput
