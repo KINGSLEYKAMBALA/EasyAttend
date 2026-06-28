@@ -9,7 +9,7 @@ import {
   RefreshControl,
   Alert,
 } from "react-native";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { collection, getDocs, query, where } from "firebase/firestore";
@@ -213,6 +213,11 @@ export default function ReportScreen() {
                 <View style={styles.rowInfo}>
                   <Text style={styles.rowName}>{getRecordName(student)}</Text>
                   <Text style={styles.rowId}>{getRecordId(student)}</Text>
+                  {student.method === "id_scan" && (
+                    <View style={styles.idScanBadge}>
+                      <Text style={styles.idScanBadgeText}>🪪 ID Scan</Text>
+                    </View>
+                  )}
                 </View>
                 <Text style={styles.rowTime}>{student.checkInTime || "-"}</Text>
                 <View style={[styles.statusBadge, isPresent(student) ? styles.presentBadge : styles.absentBadge]}>
@@ -316,4 +321,6 @@ const styles = StyleSheet.create({
   presentBadge: { backgroundColor: "#d4edda" },
   absentBadge: { backgroundColor: "#f8d7da" },
   statusText: { fontSize: 11, fontWeight: "bold", color: "#333" },
+  idScanBadge: { backgroundColor: "#e8f0fe", borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2, marginTop: 3, alignSelf: "flex-start" },
+  idScanBadgeText: { color: "#003366", fontSize: 10, fontWeight: "bold" },
 });

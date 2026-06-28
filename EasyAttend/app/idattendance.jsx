@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator, FlatList,
@@ -7,9 +7,8 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Location from "expo-location";
 import { collection, getDocs, query, where, addDoc } from "firebase/firestore";
 import { db, auth } from "../firebaseConfig";
-import { useRouter, useLocalSearchParams } from "expo-router";
+import { useRouter } from "expo-router";
 
-// Haversine formula — returns metres
 function getDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -22,31 +21,78 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-const getStudentName = (s) => s.name || s.fullName || "Unnamed student";
-const getRegNumber  = (s) => s.regNumber || s.studentId || "";
+const getStudentName = (s) => s?.name || s?.fullName || null;
+const getRegNumber  = (s) => s?.regNumber || s?.studentId || "";
 
 export default function IdAttendanceScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams();
 
-  // Phase: "venue" → "locating" → "scanning"
-  const [phase, setPhase]           = useState("venue");
-  const [venues, setVenues]         = useState([]);
-  const [venuesLoading, setVenuesLoading] = useState(true);
+  // Phase: "course" → "venue" → "locating" → "scanning"
+  const [phase, setPhase] = useState("course");
+
+  // Course selection
+  const [courses, setCourses]         = useState([]);
+  const [coursesLoading, setCoursesLoading] = useState(true);
+  const [selectedCourse, setSelectedCourse] = useState(null);
+
+  // Venue selection
+  const [venues, setVenues]           = useState([]);
+  const [venuesLoading, setVenuesLoading] = useState(false);
   const [selectedVenue, setSelectedVenue] = useState(null);
-  const [deviceLocation, setDeviceLocation] = useState(null);
   const [distanceToVenue, setDistanceToVenue] = useState(null);
 
   // Scanner
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [scanning, setScanning]     = useState(false);
+  const [scanning, setScanning]       = useState(false);
   const [scannedStudents, setScannedStudents] = useState([]);
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting]   = useState(false);
+  const [lastScanned, setLastScanned] = useState(null);
 
   useEffect(() => {
-    loadVenues();
+    loadCourses();
     if (!cameraPermission?.granted) requestCameraPermission();
   }, []);
+
+  const loadCourses = async () => {
+    setCoursesLoading(true);
+    try {
+      const email = auth.currentUser?.email;
+      const instSnap = await getDocs(
+        query(collection(db, "instructors"), where("email", "==", email))
+      );
+      if (!instSnap.empty) {
+        const inst = instSnap.docs[0].data();
+        // Support both single courseCode and courseCodes array
+        const timetableSnap = await getDocs(collection(db, "timetable"));
+        const all = timetableSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const codes = inst.courseCodes || (inst.courseCode ? [inst.courseCode] : []);
+        const filtered = codes.length > 0
+          ? all.filter(t => codes.includes(t.courseCode))
+          : all;
+        // Deduplicate by courseCode
+        const seen = new Set();
+        const unique = filtered.filter(t => {
+          if (seen.has(t.courseCode)) return false;
+          seen.add(t.courseCode);
+          return true;
+        });
+        setCourses(unique);
+      } else {
+        // Fallback: show all timetable entries
+        const snap = await getDocs(collection(db, "timetable"));
+        setCourses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }
+    } catch {
+      Alert.alert("Error", "Failed to load courses.");
+    }
+    setCoursesLoading(false);
+  };
+
+  const handleSelectCourse = (course) => {
+    setSelectedCourse(course);
+    setPhase("venue");
+    loadVenues();
+  };
 
   const loadVenues = async () => {
     setVenuesLoading(true);
@@ -73,10 +119,7 @@ export default function IdAttendanceScreen() {
     const loc = await Location.getCurrentPositionAsync({
       accuracy: Location.Accuracy.BestForNavigation,
     });
-
     const { latitude, longitude } = loc.coords;
-    setDeviceLocation({ latitude, longitude });
-
     const dist = Math.round(
       getDistance(latitude, longitude, parseFloat(venue.latitude), parseFloat(venue.longitude))
     );
@@ -89,10 +132,9 @@ export default function IdAttendanceScreen() {
   const handleBarcodeScan = async ({ data }) => {
     if (scanning) return;
 
-    // Block scan if outside allowed range
     if (!insideZone) {
       Alert.alert(
-        "⚠️ Out of Range",
+        "Out of Range",
         `You are ${distanceToVenue}m from the venue.\nYou must be within 200m to scan attendance.`,
         [{ text: "OK" }]
       );
@@ -102,45 +144,59 @@ export default function IdAttendanceScreen() {
     setScanning(true);
 
     try {
-      const code = data.trim();
-      let snap = await getDocs(query(collection(db, "students"), where("barcode", "==", code)));
+      // Mzuzu University barcodes encode reg number only e.g. "BICT1725"
+      const raw  = data.trim();
+      const normalize = (str) => str.replace(/[\s\/\-\.]/g, "").toUpperCase();
+      const code = normalize(raw);
+
+      // Try Firestore lookup to enrich with name/programme (best-effort)
+      let firestoreStudent = null;
+      let snap = await getDocs(query(collection(db, "students"), where("barcode", "==", raw)));
+      if (snap.empty) snap = await getDocs(query(collection(db, "students"), where("regNumber", "==", raw)));
+      if (snap.empty) snap = await getDocs(query(collection(db, "students"), where("regNumber", "==", code)));
       if (snap.empty) {
-        snap = await getDocs(query(collection(db, "students"), where("regNumber", "==", code)));
+        const allSnap = await getDocs(collection(db, "students"));
+        const match = allSnap.docs.find(d => {
+          const reg = normalize(d.data().regNumber || "");
+          const bar = normalize(d.data().barcode   || "");
+          return reg === code || bar === code;
+        });
+        if (match) snap = { empty: false, docs: [match] };
       }
+      if (!snap.empty) firestoreStudent = { id: snap.docs[0].id, ...snap.docs[0].data() };
 
-      if (snap.empty) {
-        Alert.alert("Not Found", `No student found for: ${data}`, [
-          { text: "Scan Again", onPress: () => setScanning(false) },
-        ]);
-        return;
-      }
+      // Stable key: Firestore id if found, else normalised reg code
+      const uid = firestoreStudent?.id || code;
 
-      const student = { id: snap.docs[0].id, ...snap.docs[0].data() };
-
-      const alreadyScanned = scannedStudents.some((s) => s.id === student.id);
+      const alreadyScanned = scannedStudents.some((s) => s.uid === uid);
       if (alreadyScanned) {
-        Alert.alert("Already Scanned", `${getStudentName(student)} was already recorded.`, [
-          { text: "OK", onPress: () => setScanning(false) },
-        ]);
+        const label = getStudentName(firestoreStudent) || raw;
+        Alert.alert("Already Scanned", `${label} (${raw}) was already recorded.`,
+          [{ text: "OK", onPress: () => setScanning(false) }]);
         return;
       }
 
+      // Build record — Firestore enriches, barcode reg is always used as fallback
       const withinRange = distanceToVenue !== null && distanceToVenue <= 200;
+      const name       = getStudentName(firestoreStudent) || raw; // use reg as name if unknown
+      const regNumber  = firestoreStudent ? getRegNumber(firestoreStudent) : raw;
+      const programme  = firestoreStudent?.programme || "";
+      const checkInTime = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+      const fromBarcode = !firestoreStudent;
+
       setScannedStudents((prev) => [
-        {
-          id: student.id,
-          name: getStudentName(student),
-          regNumber: getRegNumber(student),
-          programme: student.programme || "",
-          distance: distanceToVenue,
-          status: withinRange ? "present" : "absent",
-          checkInTime: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
-        },
+        { uid, id: firestoreStudent?.id || null, name, regNumber, programme,
+          distance: distanceToVenue, status: withinRange ? "present" : "absent",
+          checkInTime, fromBarcode },
         ...prev,
       ]);
+
+      setLastScanned({ name, regNumber, programme,
+        status: withinRange ? "present" : "absent", checkInTime, fromBarcode });
+      setTimeout(() => setLastScanned(null), 3000);
       setScanning(false);
     } catch {
-      Alert.alert("Error", "Failed to look up student.");
+      Alert.alert("Error", "Failed to process barcode.");
       setScanning(false);
     }
   };
@@ -152,28 +208,32 @@ export default function IdAttendanceScreen() {
     }
     setSubmitting(true);
     try {
+      const now = new Date().toISOString();
       for (const s of scannedStudents) {
         await addDoc(collection(db, "attendance"), {
-          sessionId: params.sessionId || "",
-          studentId: s.id,
-          name: s.name,
-          studentName: s.name,
-          regNumber: s.regNumber,
-          courseCode: params.courseCode || "",
-          courseName: params.courseName || "",
-          checkInTime: s.checkInTime,
-          distanceFromVenue: s.distance,
-          venueName: selectedVenue?.name || "",
-          method: "id_scan",
-          status: s.status || "present",
-          instructorEmail: auth.currentUser?.email || "",
-          timestamp: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
+          sessionId:          "",                         // ID scan has no session doc
+          studentId:          s.id || s.regNumber,
+          name:               s.name,
+          studentName:        s.name,
+          regNumber:          s.regNumber,
+          programme:          s.programme || "",
+          courseCode:         selectedCourse?.courseCode || "",
+          courseName:         selectedCourse?.courseName || "",
+          checkInTime:        s.checkInTime,
+          distanceFromVenue:  s.distance,
+          venueName:          selectedVenue?.name || "",
+          method:             "id_scan",
+          attendanceDate:     new Date().toLocaleDateString("en-GB"),
+          status:             s.status || "present",
+          scannedFromBarcode: s.fromBarcode || false,
+          instructorEmail:    auth.currentUser?.email || "",
+          timestamp:          now,
+          createdAt:          now,
         });
       }
       Alert.alert(
         "Attendance Submitted",
-        `${scannedStudents.length} student(s) recorded.`,
+        `${scannedStudents.length} student(s) recorded for ${selectedCourse?.courseCode}.`,
         [{ text: "Done", onPress: () => router.replace("/home") }]
       );
     } catch {
@@ -182,8 +242,8 @@ export default function IdAttendanceScreen() {
     setSubmitting(false);
   };
 
-  // ── Venue selection phase ──────────────────────────────────────────────────
-  if (phase === "venue") {
+  // ── Step 1: Course selection ───────────────────────────────────────────────
+  if (phase === "course") {
     return (
       <View style={styles.container}>
         <View style={styles.header}>
@@ -192,18 +252,68 @@ export default function IdAttendanceScreen() {
           </TouchableOpacity>
           <Text style={styles.headerTitle}>ID Attendance</Text>
         </View>
-
         <View style={styles.phaseLabel}>
-          <Text style={styles.phaseLabelText}>Step 1 — Select the venue for this session</Text>
+          <Text style={styles.stepNum}>Step 1 of 3</Text>
+          <Text style={styles.phaseLabelText}>Select the course for this session</Text>
         </View>
+        {coursesLoading ? (
+          <View style={styles.center}>
+            <ActivityIndicator color="#28a745" size="large" />
+          </View>
+        ) : courses.length === 0 ? (
+          <View style={styles.center}>
+            <Text style={styles.emptyText}>No courses assigned to your account.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={courses}
+            keyExtractor={(c) => c.id}
+            contentContainerStyle={{ padding: 16 }}
+            renderItem={({ item }) => (
+              <TouchableOpacity style={styles.courseCard} onPress={() => handleSelectCourse(item)}>
+                <View style={styles.courseCodeBadge}>
+                  <Text style={styles.courseCodeText}>{item.courseCode}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.courseName}>{item.courseName}</Text>
+                  <Text style={styles.courseMeta}>
+                    {item.programme || ""}{item.year ? ` · Year ${item.year}` : ""}
+                  </Text>
+                </View>
+                <Text style={{ color: "#a0c4ff", fontSize: 20 }}>›</Text>
+              </TouchableOpacity>
+            )}
+          />
+        )}
+      </View>
+    );
+  }
 
+  // ── Step 2: Venue selection ────────────────────────────────────────────────
+  if (phase === "venue") {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => setPhase("course")}>
+            <Text style={styles.backBtn}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>ID Attendance</Text>
+        </View>
+        <View style={styles.selectedCourseBanner}>
+          <Text style={styles.selectedCourseLabel}>Course: </Text>
+          <Text style={styles.selectedCourseValue}>{selectedCourse?.courseCode} — {selectedCourse?.courseName}</Text>
+        </View>
+        <View style={styles.phaseLabel}>
+          <Text style={styles.stepNum}>Step 2 of 3</Text>
+          <Text style={styles.phaseLabelText}>Select the venue for this session</Text>
+        </View>
         {venuesLoading ? (
           <View style={styles.center}>
             <ActivityIndicator color="#28a745" size="large" />
           </View>
         ) : venues.length === 0 ? (
           <View style={styles.center}>
-            <Text style={styles.emptyText}>No venues found. Add venues via the admin dashboard.</Text>
+            <Text style={styles.emptyText}>No venues found.</Text>
           </View>
         ) : (
           <FlatList
@@ -231,7 +341,7 @@ export default function IdAttendanceScreen() {
     );
   }
 
-  // ── Locating GPS phase ─────────────────────────────────────────────────────
+  // ── Locating GPS ───────────────────────────────────────────────────────────
   if (phase === "locating") {
     return (
       <View style={[styles.container, styles.center]}>
@@ -241,11 +351,9 @@ export default function IdAttendanceScreen() {
     );
   }
 
-  // ── Scanning phase ─────────────────────────────────────────────────────────
-
+  // ── Step 3: Scanning ───────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setPhase("venue")}>
           <Text style={styles.backBtn}>← Back</Text>
@@ -253,15 +361,22 @@ export default function IdAttendanceScreen() {
         <Text style={styles.headerTitle}>ID Attendance</Text>
       </View>
 
-      {/* Venue + distance bar */}
+      {/* Course + venue info bar */}
+      <View style={styles.infoBar}>
+        <Text style={styles.infoBarCourse}>{selectedCourse?.courseCode}</Text>
+        <Text style={styles.infoBarSep}>·</Text>
+        <Text style={styles.infoBarVenue}>{selectedVenue?.name}</Text>
+      </View>
+
+      {/* Distance bar */}
       <View style={[styles.distanceBar, insideZone ? styles.distanceBarIn : styles.distanceBarOut]}>
-        <Text style={styles.distanceBarVenue}>📍 {selectedVenue?.name}</Text>
+        <Text style={styles.distanceBarVenue}>Step 3 of 3 — Scan student IDs</Text>
         <Text style={styles.distanceBarDist}>
           {insideZone ? "✅" : "⚠️"} {distanceToVenue}m from venue
         </Text>
       </View>
 
-      {/* Camera — blocked if out of range */}
+      {/* Camera */}
       {!insideZone ? (
         <View style={styles.cameraBlockedBox}>
           <View style={styles.cameraBlockedCircle}>
@@ -270,11 +385,9 @@ export default function IdAttendanceScreen() {
           <Text style={styles.cameraBlockedTitle}>Scanning Blocked</Text>
           <View style={styles.cameraBlockedDistRow}>
             <Text style={styles.cameraBlockedDistNum}>{distanceToVenue}m</Text>
-            <Text style={styles.cameraBlockedDistLabel}> away from {selectedVenue?.name}</Text>
+            <Text style={styles.cameraBlockedDistLabel}> from {selectedVenue?.name}</Text>
           </View>
-          <Text style={styles.cameraBlockedSub}>
-            📍 Allowed limit is 200m.{"\n"}Move closer to {selectedVenue?.name} to scan.
-          </Text>
+          <Text style={styles.cameraBlockedSub}>Move within 200m to scan.</Text>
         </View>
       ) : cameraPermission?.granted ? (
         <View style={styles.cameraBox}>
@@ -286,7 +399,6 @@ export default function IdAttendanceScreen() {
               barcodeTypes: ["code128", "code39", "code93", "ean13", "ean8", "upc_a", "upc_e", "qr"],
             }}
           />
-          {/* Scan frame */}
           <View style={styles.scanOverlay}>
             <View style={styles.scanFrame}>
               <View style={[styles.corner, styles.tl]} />
@@ -301,6 +413,26 @@ export default function IdAttendanceScreen() {
               <Text style={styles.scanningBadgeText}> Looking up student…</Text>
             </View>
           )}
+          {lastScanned && !scanning && (
+            <View style={[styles.lastScannedBanner,
+              lastScanned.status === "present" ? styles.bannerPresent : styles.bannerAbsent]}>
+              <View style={styles.bannerIconCircle}>
+                <Text style={styles.bannerIcon}>{lastScanned.status === "present" ? "✓" : "✗"}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.bannerName}>{lastScanned.name}</Text>
+                <Text style={styles.bannerReg}>
+                  {lastScanned.regNumber}{lastScanned.programme ? `  ·  ${lastScanned.programme}` : ""}
+                  {lastScanned.fromBarcode ? "  ·  ID only" : ""}
+                </Text>
+                <Text style={styles.bannerStatus}>
+                  {lastScanned.status === "present"
+                    ? `✅ Present · ${lastScanned.checkInTime}`
+                    : "⚠️ Marked Absent — out of range"}
+                </Text>
+              </View>
+            </View>
+          )}
         </View>
       ) : (
         <View style={[styles.cameraBox, styles.center]}>
@@ -313,29 +445,31 @@ export default function IdAttendanceScreen() {
 
       {/* Scanned list */}
       <View style={styles.listSection}>
-        <Text style={styles.listTitle}>
-          Scanned Students ({scannedStudents.length})
-        </Text>
-        <ScrollView style={styles.listScroll} keyboardShouldPersistTaps="handled">
+        <Text style={styles.listTitle}>Scanned ({scannedStudents.length})</Text>
+        <ScrollView style={styles.listScroll}>
           {scannedStudents.length === 0 ? (
             <Text style={styles.emptyText}>Point camera at a student ID barcode…</Text>
           ) : (
             scannedStudents.map((s) => {
               const isPresent = s.status === "present";
               return (
-                <View
-                  key={s.id}
-                  style={[
-                    styles.studentCard,
-                    isPresent ? styles.studentCardPresent : styles.studentCardAbsent,
-                  ]}
-                >
+                <View key={s.uid}
+                  style={[styles.studentCard,
+                    isPresent ? styles.studentCardPresent : styles.studentCardAbsent]}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.studentName}>{s.name}</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <Text style={styles.studentName}>{s.name}</Text>
+                      {s.fromBarcode && (
+                        <View style={styles.idOnlyBadge}>
+                          <Text style={styles.idOnlyText}>ID only</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={styles.studentReg}>{s.regNumber}</Text>
                     <Text style={styles.studentTime}>Scanned at {s.checkInTime}</Text>
-                    <Text style={[styles.studentStatus, isPresent ? styles.statusPresent : styles.statusAbsent]}>
-                      {isPresent ? "✅ Present" : `⚠️ Absent — ${s.distance}m away (limit: 200m)`}
+                    <Text style={[styles.studentStatus,
+                      isPresent ? styles.statusPresent : styles.statusAbsent]}>
+                      {isPresent ? "✅ Present" : `⚠️ Absent — ${s.distance}m (limit 200m)`}
                     </Text>
                   </View>
                   <View style={[styles.distBadge, isPresent ? styles.distBadgeIn : styles.distBadgeOut]}>
@@ -350,15 +484,11 @@ export default function IdAttendanceScreen() {
         </ScrollView>
       </View>
 
-      {/* Submit */}
       {scannedStudents.length > 0 && (
         <View style={styles.footer}>
           <TouchableOpacity style={styles.btn} onPress={handleSubmit} disabled={submitting}>
-            {submitting ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.btnText}>Submit {scannedStudents.length} Student(s)</Text>
-            )}
+            {submitting ? <ActivityIndicator color="#fff" /> :
+              <Text style={styles.btnText}>Submit {scannedStudents.length} Student(s)</Text>}
           </TouchableOpacity>
         </View>
       )}
@@ -373,7 +503,21 @@ const styles = StyleSheet.create({
   headerTitle:      { color: "#ffffff", fontSize: 18, fontWeight: "bold" },
   center:           { flex: 1, alignItems: "center", justifyContent: "center", padding: 24 },
   phaseLabel:       { backgroundColor: "#131c30", padding: 14, borderBottomWidth: 1, borderBottomColor: "#2a3f5f" },
+  stepNum:          { color: "#28a745", fontSize: 11, fontWeight: "bold", textAlign: "center", marginBottom: 2 },
   phaseLabelText:   { color: "#8899bb", fontSize: 13, textAlign: "center" },
+  emptyText:        { color: "#8899bb", fontSize: 13, textAlign: "center", marginTop: 8 },
+
+  // Selected course banner
+  selectedCourseBanner: { backgroundColor: "#0d3326", paddingHorizontal: 16, paddingVertical: 10, flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: "#1a5c3a" },
+  selectedCourseLabel:  { color: "#8899bb", fontSize: 12 },
+  selectedCourseValue:  { color: "#28a745", fontSize: 12, fontWeight: "bold", flex: 1 },
+
+  // Course cards
+  courseCard:       { backgroundColor: "#131c30", borderRadius: 12, padding: 16, marginBottom: 12, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: "#2a3f5f", gap: 12 },
+  courseCodeBadge:  { backgroundColor: "#0d3326", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: "#28a745" },
+  courseCodeText:   { color: "#28a745", fontSize: 13, fontWeight: "bold" },
+  courseName:       { color: "#ffffff", fontSize: 14, fontWeight: "bold" },
+  courseMeta:       { color: "#8899bb", fontSize: 12, marginTop: 2 },
 
   // Venue cards
   venueCard:        { backgroundColor: "#131c30", borderRadius: 12, padding: 16, marginBottom: 12, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: "#2a3f5f", gap: 12 },
@@ -382,25 +526,31 @@ const styles = StyleSheet.create({
   venueBuilding:    { color: "#8899bb", fontSize: 12 },
   venueCoords:      { color: "#445566", fontSize: 11 },
 
+  // Info bar (scanning phase)
+  infoBar:          { backgroundColor: "#0d3326", flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 8, gap: 8, borderBottomWidth: 1, borderBottomColor: "#1a5c3a" },
+  infoBarCourse:    { color: "#28a745", fontSize: 13, fontWeight: "bold" },
+  infoBarSep:       { color: "#445566", fontSize: 13 },
+  infoBarVenue:     { color: "#8899bb", fontSize: 13, flex: 1 },
+
   // Distance bar
   distanceBar:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1 },
   distanceBarIn:    { backgroundColor: "#1a3a2a", borderBottomColor: "#28a745" },
   distanceBarOut:   { backgroundColor: "#3a1a1a", borderBottomColor: "#c0392b" },
-  distanceBarVenue: { color: "#ffffff", fontSize: 13, fontWeight: "bold" },
-  distanceBarDist:  { color: "#ffffff", fontSize: 13 },
+  distanceBarVenue: { color: "#ffffff", fontSize: 12 },
+  distanceBarDist:  { color: "#ffffff", fontSize: 12 },
 
   // Camera blocked
-  cameraBlockedBox:      { height: 220, backgroundColor: "#2a1a1a", borderWidth: 2, borderColor: "#c0392b", alignItems: "center", justifyContent: "center", padding: 20 },
-  cameraBlockedCircle:   { width: 56, height: 56, borderRadius: 28, backgroundColor: "#c0392b", alignItems: "center", justifyContent: "center", marginBottom: 8, borderWidth: 3, borderColor: "#ff6b6b" },
-  cameraBlockedCross:    { color: "#ffffff", fontSize: 26, fontWeight: "bold", lineHeight: 30 },
-  cameraBlockedTitle:    { color: "#ff6b6b", fontSize: 16, fontWeight: "bold", marginBottom: 8 },
-  cameraBlockedDistRow:  { flexDirection: "row", alignItems: "baseline", marginBottom: 8 },
-  cameraBlockedDistNum:  { color: "#ff4444", fontSize: 28, fontWeight: "bold" },
-  cameraBlockedDistLabel:{ color: "#cc8888", fontSize: 14, fontWeight: "600" },
-  cameraBlockedSub:      { color: "#cc8888", fontSize: 12, textAlign: "center", lineHeight: 18 },
+  cameraBlockedBox:      { height: 200, backgroundColor: "#2a1a1a", borderWidth: 2, borderColor: "#c0392b", alignItems: "center", justifyContent: "center", padding: 20 },
+  cameraBlockedCircle:   { width: 52, height: 52, borderRadius: 26, backgroundColor: "#c0392b", alignItems: "center", justifyContent: "center", marginBottom: 8 },
+  cameraBlockedCross:    { color: "#ffffff", fontSize: 24, fontWeight: "bold" },
+  cameraBlockedTitle:    { color: "#ff6b6b", fontSize: 16, fontWeight: "bold", marginBottom: 6 },
+  cameraBlockedDistRow:  { flexDirection: "row", alignItems: "baseline", marginBottom: 6 },
+  cameraBlockedDistNum:  { color: "#ff4444", fontSize: 26, fontWeight: "bold" },
+  cameraBlockedDistLabel:{ color: "#cc8888", fontSize: 13 },
+  cameraBlockedSub:      { color: "#cc8888", fontSize: 12, textAlign: "center" },
 
   // Camera
-  cameraBox:        { height: 220, position: "relative" },
+  cameraBox:        { height: 200, position: "relative" },
   camera:           { flex: 1 },
   scanOverlay:      { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
   scanFrame:        { width: 220, height: 80, position: "relative" },
@@ -412,11 +562,24 @@ const styles = StyleSheet.create({
   scanningBadge:    { position: "absolute", bottom: 8, alignSelf: "center", flexDirection: "row", backgroundColor: "rgba(0,0,0,0.7)", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6 },
   scanningBadgeText:{ color: "#fff", fontSize: 13 },
 
+  // Last scanned banner
+  lastScannedBanner: { position: "absolute", bottom: 0, left: 0, right: 0, flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
+  bannerPresent:     { backgroundColor: "rgba(16,185,129,0.95)" },
+  bannerAbsent:      { backgroundColor: "rgba(192,57,43,0.95)" },
+  bannerIconCircle:  { width: 42, height: 42, borderRadius: 21, backgroundColor: "rgba(255,255,255,0.25)", alignItems: "center", justifyContent: "center" },
+  bannerIcon:        { color: "#fff", fontSize: 22, fontWeight: "bold" },
+  bannerName:        { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  bannerReg:         { color: "rgba(255,255,255,0.85)", fontSize: 12, marginTop: 1 },
+  bannerStatus:      { color: "rgba(255,255,255,0.9)", fontSize: 12, marginTop: 3 },
+
+  // "ID only" badge
+  idOnlyBadge:      { backgroundColor: "#f59e0b22", borderWidth: 1, borderColor: "#f59e0b", borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2 },
+  idOnlyText:       { color: "#f59e0b", fontSize: 10, fontWeight: "bold" },
+
   // Student list
   listSection:      { flex: 1, paddingHorizontal: 16, paddingTop: 10 },
   listTitle:        { color: "#ffffff", fontSize: 14, fontWeight: "bold", marginBottom: 8 },
   listScroll:       { flex: 1 },
-  emptyText:        { color: "#8899bb", fontSize: 13, textAlign: "center", marginTop: 8 },
   studentCard:         { backgroundColor: "#131c30", borderRadius: 12, padding: 14, marginBottom: 10, flexDirection: "row", alignItems: "center", borderWidth: 1 },
   studentCardPresent:  { borderColor: "#28a745", backgroundColor: "#0f2018" },
   studentCardAbsent:   { borderColor: "#c0392b", backgroundColor: "#200f0f" },

@@ -1,8 +1,13 @@
+import { useState, useEffect } from "react";
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { signOut } from "firebase/auth";
-import { auth } from "../firebaseConfig";
+import { auth, db } from "../firebaseConfig";
 import { useTheme } from "../context/ThemeContext";
+import { collection, getDocs, query, limit } from "firebase/firestore";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const LAST_READ_KEY = "@easyattend_notif_last_read";
 
 const MENU = [
   {
@@ -37,6 +42,15 @@ const MENU = [
     accent: "#f59e0b",
     accentBg: "#3d2a0a",
   },
+  {
+    route: "/notifications",
+    icon: "🔔",
+    label: "Notifications",
+    desc: "New venues, sessions and system events",
+    accent: "#ef4444",
+    accentBg: "#3a0a0a",
+    notifKey: true,   // flag: show unread badge
+  },
 ];
 
 export default function HomeScreen() {
@@ -44,6 +58,30 @@ export default function HomeScreen() {
   const { theme: t, toggleTheme } = useTheme();
   const email = auth.currentUser?.email || "Instructor";
   const displayName = email.split("@")[0].replace(/\./g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    loadUnreadCount();
+  }, []);
+
+  const loadUnreadCount = async () => {
+    try {
+      const lastReadStr = await AsyncStorage.getItem(LAST_READ_KEY);
+      const lastRead = lastReadStr ? new Date(lastReadStr) : null;
+      const COLS = ["venues", "sessions", "timetable", "students", "attendance"];
+      let count = 0;
+      await Promise.all(COLS.map(async (col) => {
+        try {
+          const snap = await getDocs(query(collection(db, col), limit(20)));
+          snap.docs.forEach(d => {
+            const ts = d.data().createdAt || d.data().timestamp;
+            if (ts && (!lastRead || new Date(ts) > lastRead)) count++;
+          });
+        } catch { /* skip */ }
+      }));
+      setUnreadCount(count);
+    } catch { /* ignore */ }
+  };
 
   const handleLogout = async () => {
     await signOut(auth);
@@ -98,11 +136,19 @@ export default function HomeScreen() {
           <TouchableOpacity
             key={item.route}
             style={[s.card, { backgroundColor: isDark ? "#161b22" : "#ffffff", borderColor: isDark ? "#21262d" : "#e2e8f0" }]}
-            onPress={() => router.push(item.route)}
+            onPress={() => {
+              if (item.notifKey) setUnreadCount(0); // clear badge when opening notifications
+              router.push(item.route);
+            }}
             activeOpacity={0.75}
           >
             <View style={[s.cardIcon, { backgroundColor: item.accentBg }]}>
               <Text style={{ fontSize: 22 }}>{item.icon}</Text>
+              {item.notifKey && unreadCount > 0 && (
+                <View style={s.notifDot}>
+                  <Text style={s.notifDotText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
+                </View>
+              )}
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[s.cardLabel, { color: isDark ? "#e6edf3" : "#0f172a" }]}>{item.label}</Text>
@@ -161,6 +207,8 @@ const s = StyleSheet.create({
   cardLabel:     { fontSize: 15, fontWeight: "600" },
   cardDesc:      { fontSize: 12, marginTop: 3, lineHeight: 16 },
   cardArrow:     { fontSize: 26, fontWeight: "bold" },
+  notifDot:      { position: "absolute", top: -4, right: -4, backgroundColor: "#ef4444", borderRadius: 10, minWidth: 18, height: 18, alignItems: "center", justifyContent: "center", paddingHorizontal: 4, borderWidth: 2, borderColor: "#0d1117" },
+  notifDotText:  { color: "#ffffff", fontSize: 9, fontWeight: "bold" },
 
   // Logout bar pinned at bottom
   logoutBar:     { borderTopWidth: 1, padding: 12 },

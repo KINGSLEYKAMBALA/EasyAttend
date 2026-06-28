@@ -31,48 +31,46 @@ export default function ScanScreen() {
     setScanning(true);
 
     try {
-      const code = data.trim();
-      let q = query(
-        collection(db, "students"),
-        where("barcode", "==", code)
-      );
-      let snapshot = await getDocs(q);
+      const raw = data.trim();
 
+      // Parse barcode: may encode "REG|Name|Programme" or just "REG"
+      const DELIMITERS = ["|", ";", ",", "\t"];
+      let parts = null;
+      for (const sep of DELIMITERS) {
+        if (raw.includes(sep)) { parts = raw.split(sep).map(p => p.trim()); break; }
+      }
+      const barcodeReg  = parts ? parts[0] : raw;
+      const barcodeName = parts && parts[1] ? parts[1] : null;
+      const barcodeProg = parts && parts[2] ? parts[2] : null;
+
+      // Normalize for Firestore lookup
+      const normalize = (str) => str.replace(/[\s\/\-\.]/g, "").toUpperCase();
+      const code = normalize(barcodeReg);
+
+      // Try Firestore (best-effort)
+      let snapshot = await getDocs(query(collection(db, "students"), where("barcode", "==", raw)));
+      if (snapshot.empty) snapshot = await getDocs(query(collection(db, "students"), where("regNumber", "==", barcodeReg)));
+      if (snapshot.empty) snapshot = await getDocs(query(collection(db, "students"), where("regNumber", "==", code)));
       if (snapshot.empty) {
-        q = query(collection(db, "students"), where("regNumber", "==", code));
-        snapshot = await getDocs(q);
+        const allSnap = await getDocs(collection(db, "students"));
+        const match = allSnap.docs.find(d => {
+          const reg = normalize(d.data().regNumber || "");
+          const bar = normalize(d.data().barcode   || "");
+          return reg === code || bar === code;
+        });
+        if (match) snapshot = { empty: false, docs: [match] };
       }
 
-      if (snapshot.empty) {
-        Alert.alert(
-          "Student Not Found ❌",
-          `No student found with barcode:\n${data}`,
-          [
-            {
-              text: "Scan Again",
-              onPress: () => {
-                setScanned(false);
-                setScanning(false);
-              }
-            },
-            {
-              text: "Go Back",
-              onPress: () => router.back()
-            }
-          ]
-        );
-        return;
-      }
+      // Build record — Firestore takes priority, barcode data as fallback
+      const firestoreStudent = snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+      const studentName = firestoreStudent
+        ? getStudentName(firestoreStudent)
+        : (barcodeName || "Unknown");
+      const regNumber  = firestoreStudent ? getRegNumber(firestoreStudent) : barcodeReg;
+      const programme  = firestoreStudent ? getStudentProgram(firestoreStudent) : (barcodeProg || "");
 
-      const studentDoc = snapshot.docs[0];
-      const student = studentDoc.data();
-      const studentName = getStudentName(student);
-      const regNumber = getRegNumber(student);
-      const programme = getStudentProgram(student);
-
-      // Record attendance
       await addDoc(collection(db, "attendance"), {
-        studentId: studentDoc.id,
+        studentId: firestoreStudent?.id || regNumber,
         name: studentName,
         studentName,
         regNumber,
@@ -84,24 +82,16 @@ export default function ScanScreen() {
         timestamp: new Date().toISOString(),
         method: "barcode",
         status: "present",
+        scannedFromBarcode: !firestoreStudent,
         createdAt: new Date().toISOString(),
       });
 
       Alert.alert(
-        "Attendance Recorded",
-        `Name: ${studentName}\nReg No: ${regNumber}\nProgramme: ${programme}`,
+        "Attendance Recorded ✅",
+        `Name: ${studentName}\nReg No: ${regNumber}${programme ? `\nProgramme: ${programme}` : ""}`,
         [
-          {
-            text: "Scan Next",
-            onPress: () => {
-              setScanned(false);
-              setScanning(false);
-            }
-          },
-          {
-            text: "Done",
-            onPress: () => router.back()
-          }
+          { text: "Scan Next", onPress: () => { setScanned(false); setScanning(false); } },
+          { text: "Done", onPress: () => router.back() }
         ]
       );
 
