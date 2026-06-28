@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator, FlatList,
@@ -47,10 +47,15 @@ export default function IdAttendanceScreen() {
   const [scannedStudents, setScannedStudents] = useState([]);
   const [submitting, setSubmitting]   = useState(false);
   const [lastScanned, setLastScanned] = useState(null);
+  const locationSubRef = useRef(null);
 
   useEffect(() => {
     loadCourses();
     if (!cameraPermission?.granted) requestCameraPermission();
+    return () => {
+      // Clean up location watcher when leaving the screen
+      if (locationSubRef.current) locationSubRef.current.remove();
+    };
   }, []);
 
   const loadCourses = async () => {
@@ -116,13 +121,34 @@ export default function IdAttendanceScreen() {
       return;
     }
 
-    const loc = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.BestForNavigation,
-    });
-    const { latitude, longitude } = loc.coords;
-    const dist = Math.round(
-      getDistance(latitude, longitude, parseFloat(venue.latitude), parseFloat(venue.longitude))
+    // Get venue coordinates — handle nested objects, strings, or numbers
+    const venueLat = parseFloat(venue.latitude ?? venue.location?.latitude ?? venue.coords?.latitude ?? 0);
+    const venueLon = parseFloat(venue.longitude ?? venue.location?.longitude ?? venue.coords?.longitude ?? 0);
+
+    if (!venueLat || !venueLon) {
+      Alert.alert(
+        "Venue Has No Coordinates",
+        "This venue has no GPS coordinates saved. Please set coordinates in the admin panel.",
+        [{ text: "Go Back", onPress: () => setPhase("venue") }]
+      );
+      return;
+    }
+
+    // Watch position continuously so distance updates as instructor moves
+    const sub = await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.BestForNavigation, distanceInterval: 5 },
+      (loc) => {
+        const { latitude, longitude } = loc.coords;
+        const dist = Math.round(getDistance(latitude, longitude, venueLat, venueLon));
+        setDistanceToVenue(dist);
+      }
     );
+    // Store subscription so we can remove it on unmount
+    locationSubRef.current = sub;
+
+    // Get immediate first reading
+    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
+    const dist = Math.round(getDistance(loc.coords.latitude, loc.coords.longitude, venueLat, venueLon));
     setDistanceToVenue(dist);
     setPhase("scanning");
   };
@@ -328,9 +354,13 @@ export default function IdAttendanceScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.venueName}>{item.name}</Text>
                   <Text style={styles.venueBuilding}>{item.building}</Text>
-                  <Text style={styles.venueCoords}>
-                    📍 {parseFloat(item.latitude)?.toFixed(5)}, {parseFloat(item.longitude)?.toFixed(5)}
-                  </Text>
+                  {(item.latitude && item.longitude) ? (
+                    <Text style={styles.venueCoords}>
+                      📍 {parseFloat(item.latitude).toFixed(5)}, {parseFloat(item.longitude).toFixed(5)}
+                    </Text>
+                  ) : (
+                    <Text style={[styles.venueCoords, { color: "#c0392b" }]}>⚠️ No coordinates set</Text>
+                  )}
                 </View>
                 <Text style={{ color: "#a0c4ff", fontSize: 20 }}>›</Text>
               </TouchableOpacity>
