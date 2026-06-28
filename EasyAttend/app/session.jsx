@@ -2,8 +2,9 @@ import { useState, useEffect } from "react";
 import {
   View, Text, TouchableOpacity,
   StyleSheet, ScrollView, Alert,
-  ActivityIndicator, Modal, TextInput
+  ActivityIndicator, Modal, Platform,
 } from "react-native";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import { collection, addDoc, query, where, getDocs } from "firebase/firestore";
 import { db, auth } from "../firebaseConfig";
 import { useRouter, useLocalSearchParams } from "expo-router";
@@ -18,8 +19,8 @@ export default function SessionScreen() {
   const [loadingStudents, setLoadingStudents] = useState(true);
   const [starting, setStarting] = useState(false);
   const [makeUpModalVisible, setMakeUpModalVisible] = useState(false);
-  const [makeUpDate, setMakeUpDate] = useState("");
-  const [dateError, setDateError]   = useState("");
+  const [makeUpDate, setMakeUpDate] = useState(new Date());
+  const [showPicker, setShowPicker] = useState(false);
   const [makeUpReason, setMakeUpReason] = useState("");
 
   useEffect(() => {
@@ -92,42 +93,21 @@ export default function SessionScreen() {
 
   const handleInitiateSession = () => startSession(false);
 
-  // Auto-format input as YYYY-MM-DD while typing
-  const handleDateChange = (text) => {
-    // Strip non-digits
-    const digits = text.replace(/\D/g, "").slice(0, 8);
-    let formatted = digits;
-    if (digits.length > 4) formatted = digits.slice(0, 4) + "-" + digits.slice(4);
-    if (digits.length > 6) formatted = digits.slice(0, 4) + "-" + digits.slice(4, 6) + "-" + digits.slice(6);
-    setMakeUpDate(formatted);
-
-    // Validate when full date entered
-    if (formatted.length === 10) {
-      const d = new Date(formatted);
-      const [y, m, day] = formatted.split("-").map(Number);
-      if (isNaN(d.getTime()) || d.getFullYear() !== y || d.getMonth() + 1 !== m || d.getDate() !== day) {
-        setDateError("Invalid date. Please check the day/month.");
-      } else if (d < new Date(new Date().setHours(0,0,0,0))) {
-        setDateError("Date cannot be in the past.");
-      } else {
-        setDateError("");
-      }
-    } else {
-      setDateError("");
-    }
+  const onPickerChange = (event, selected) => {
+    setShowPicker(Platform.OS === "ios"); // keep open on iOS, close on Android
+    if (selected) setMakeUpDate(selected);
   };
 
+  const formattedDate = makeUpDate.toISOString().split("T")[0]; // YYYY-MM-DD
+
   const handleConfirmMakeUp = () => {
-    if (!makeUpDate || makeUpDate.length < 10) {
-      Alert.alert("Missing Date", "Please enter a valid date (YYYY-MM-DD).");
-      return;
-    }
-    if (dateError) {
-      Alert.alert("Invalid Date", dateError);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    if (makeUpDate < today) {
+      Alert.alert("Invalid Date", "The make-up class date cannot be in the past.");
       return;
     }
     setMakeUpModalVisible(false);
-    startSession(true, { date: makeUpDate, reason: makeUpReason });
+    startSession(true, { date: formattedDate, reason: makeUpReason });
   };
 
   const isLive = params.statusType === "live";
@@ -248,20 +228,20 @@ export default function SessionScreen() {
             <Text style={styles.modalTitle}>Schedule Make-Up Class</Text>
 
             <Text style={styles.modalLabel}>DATE</Text>
-            <TextInput
-              style={[styles.modalInput, dateError ? { borderColor: "#e74c3c", borderWidth: 1 } : {}]}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#555"
-              value={makeUpDate}
-              onChangeText={handleDateChange}
-              keyboardType="numeric"
-              maxLength={10}
-            />
-            {dateError ? (
-              <Text style={{ color: "#e74c3c", fontSize: 11, marginBottom: 8, marginTop: -4 }}>{dateError}</Text>
-            ) : makeUpDate.length === 10 && !dateError ? (
-              <Text style={{ color: "#28a745", fontSize: 11, marginBottom: 8, marginTop: -4 }}>✓ Valid date</Text>
-            ) : null}
+            <TouchableOpacity style={styles.datePickerBtn} onPress={() => setShowPicker(true)}>
+              <Text style={styles.datePickerIcon}>📅</Text>
+              <Text style={styles.datePickerText}>{formattedDate}</Text>
+              <Text style={styles.datePickerChevron}>›</Text>
+            </TouchableOpacity>
+            {showPicker && (
+              <DateTimePicker
+                value={makeUpDate}
+                mode="date"
+                display={Platform.OS === "ios" ? "inline" : "default"}
+                minimumDate={new Date()}
+                onChange={onPickerChange}
+              />
+            )}
 
             <Text style={styles.modalLabel}>REASON (OPTIONAL)</Text>
             <TextInput
@@ -340,6 +320,13 @@ const styles = StyleSheet.create({
   modalCard: { backgroundColor: "#131c30", borderRadius: 16, padding: 20, borderWidth: 1, borderColor: "#2a3f5f" },
   modalTitle: { color: "#ffffff", fontSize: 17, fontWeight: "bold", marginBottom: 16 },
   modalLabel: { fontSize: 11, fontWeight: "bold", color: "#8899bb", letterSpacing: 1, marginBottom: 6, marginTop: 10 },
+  datePickerBtn: {
+    backgroundColor: "#0d1b3e", borderRadius: 10, padding: 14, borderWidth: 1,
+    borderColor: "#28a745", flexDirection: "row", alignItems: "center", gap: 10,
+  },
+  datePickerIcon:    { fontSize: 20 },
+  datePickerText:    { flex: 1, color: "#ffffff", fontSize: 16, fontWeight: "600" },
+  datePickerChevron: { color: "#28a745", fontSize: 22, fontWeight: "bold" },
   modalInput: {
     backgroundColor: "#0d1b3e", borderRadius: 10, padding: 12, fontSize: 14,
     color: "#ffffff", borderWidth: 1, borderColor: "#2a3f5f",
