@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import {
   View, Text, TouchableOpacity,
   StyleSheet, ScrollView, Alert,
-  ActivityIndicator, Modal, Platform,
+  ActivityIndicator, Modal, Platform, TextInput,
 } from "react-native";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { collection, addDoc, query, where, getDocs } from "firebase/firestore";
